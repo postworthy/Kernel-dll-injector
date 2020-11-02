@@ -8,7 +8,6 @@ Place your dll in whatever location, compile the driver with the new dll path </
 Load the driver </br>
 Dll should inject in every new process that needs to load kernel32.dll </br>
 # Limitations
-Not compatible with x64, but adaptability its pretty much straightforward </br>
 Not sure about the impact the whole process injection can cause on the system, tested the project for about 1 hour and no BSOD's whatsoever </br>
 # More Information
 https://alexvogtkernel.blogspot.com/2018/09/kernel-injection-code-reversing-sirifef.html </br>
