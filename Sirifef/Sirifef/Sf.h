@@ -1,10 +1,7 @@
 #pragma once
 
 #include <ntddk.h>
-
-
-#define SIRIFEF_LOADLIBRARYEXA_ADDRESS 1268416216
-
+#include <ntstrsafe.h>
 
 typedef PVOID(*fnLoadLibraryExA)(
 	LPCSTR lpLibFileName,
@@ -88,8 +85,8 @@ VOID LoadImageNotifyRoutine(IN PUNICODE_STRING ImageName, IN HANDLE ProcessId, I
 VOID NTAPI APCInjectorRoutine(PKAPC Apc, PKNORMAL_ROUTINE *NormalRoutine, PVOID *SystemArgument1, PVOID *SystemArgument2, PVOID *Context);
 VOID SirifefWorkerRoutine(PVOID Context);
 UINT32 HashString(PCHAR pcString);
-PVOID GetProcedureAddressByHash(PVOID ModuleBase, ULONG Hash, ULONG Data);
+PVOID GetProcedureAddress(PVOID ModuleBase, PCSTR ProcName, ULONG Data);
 VOID NTAPI LoadDynamicFunctions(PGET_ADDRESS Hash);
-PVOID ResolveDynamicImport(PVOID ModuleBase, ULONG Hash);
+PVOID ResolveDynamicImport(PVOID ModuleBase, PCSTR ProcName);
 
 extern GET_ADDRESS Hash;

